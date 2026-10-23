@@ -115,7 +115,10 @@
     heatMonths: 3,
     openFolds: {},
     sheet: null,
-    draft: null
+    draft: null,
+    emailSent: false,
+    emailDraft: '',
+    cloudMsg: ''
   };
 
   /* ---------- 工具 ---------- */
@@ -666,9 +669,81 @@
 
   /* ---------- 设置 ---------- */
 
+  /* ---------- 云同步卡片 ---------- */
+
+  function cloudCard() {
+    const C = window.Cloud;
+    if (!C) {
+      return '<div class="card"><div style="font-size:14px;font-weight:600">云端备份</div>' +
+        '<div class="tiny mt-8">云服务组件未加载，刷新页面再试。</div></div>';
+    }
+    if (!C.isSignedIn()) {
+      const err = C.error ? '<div class="field-hint" style="color:#B4483A;margin-top:8px">' + esc(C.error) + '</div>' : '';
+      return '<div class="card">' +
+        '<div style="font-size:14px;font-weight:600">云端备份</div>' +
+        '<div class="tiny mt-8">登录后，每天的打卡会同时存一份到云端。换手机或电脑登录同一账号，记录就跟过来。' +
+        '<br>不登录也能照常用，只是数据仅在本机。</div>' +
+        '<div class="divider"></div>' +
+        '<button class="btn" data-act="cloud-workbuddy">使用 WorkBuddy 登录</button>' +
+        '<button class="btn line sm" style="margin-top:8px" data-act="cloud-email">用邮箱验证码登录</button>' +
+        err + '</div>';
+    }
+    const ts = C.lastSyncAt();
+    const when = ts ? esc(S.fmtDateTime(ts)) : '还没同步过';
+    return '<div class="card">' +
+      '<div class="flex"><div class="grow"><div style="font-size:14px;font-weight:600">云端已连接</div>' +
+      '<div class="tiny mt-8">' + esc(C.accountLabel()) + '</div>' +
+      '<div class="tiny mt-8">上次同步 ' + when + '</div></div>' +
+      '<span class="pill calm">已同步</span></div>' +
+      '<div class="divider"></div>' +
+      '<div class="btn-row"><button class="btn ghost sm grow" data-act="cloud-sync">立即同步</button>' +
+      '<button class="btn line sm" data-act="cloud-logout">退出登录</button></div>' +
+      '</div>';
+  }
+
+  function openEmailLoginSheet() {
+    const sent = state.emailSent === true;
+    const err = state.cloudMsg ? '<div class="field-hint" style="color:#B4483A;margin-top:8px">' + esc(state.cloudMsg) + '</div>' : '';
+    let h = '<div class="field-hint">验证码发到邮箱，不用设密码。第一次登录会自动创建账号。</div>';
+    h += '<div class="field" style="margin-top:16px"><div class="field-label"><span>邮箱</span></div>' +
+      '<input type="email" inputmode="email" autocomplete="email" id="cloudEmail" placeholder="you@example.com" value="' + esc(state.emailDraft || '') + '">' +
+      '</div>';
+    if (sent) {
+      h += '<div class="field"><div class="field-label"><span>验证码</span></div>' +
+        '<input type="text" inputmode="numeric" autocomplete="one-time-code" id="cloudCode" placeholder="邮件里的数字" maxlength="8">' +
+        '</div>';
+      h += '<div class="field-hint">没收到？检查垃圾邮件，或点「重发」。</div>';
+    }
+    h += err;
+    h += '<div class="btn-row sheet-actions">' +
+      (sent
+        ? '<button class="btn line" data-act="cloud-resend">重发</button><button class="btn grow" data-act="cloud-verify">登录</button>'
+        : '<button class="btn grow" data-act="cloud-send-code">获取验证码</button>') +
+      '</div>';
+    openSheet(sent ? '输入验证码' : '邮箱登录', h);
+    state.sheet = { kind: 'cloud-email' };
+  }
+
+  function readCloudEmail() {
+    const el = document.getElementById('cloudEmail');
+    return el ? String(el.value || '').trim() : '';
+  }
+
+  function readCloudCode() {
+    const el = document.getElementById('cloudCode');
+    return el ? String(el.value || '').trim() : '';
+  }
+
+  async function cloudAfterLogin() {
+    try { await Cloud.syncNow(S); } catch (e) { /* 忽略，稍后可手动同步 */ }
+    await reload();
+    render();
+    toast('已登录，记录已与云端合并');
+  }
+
   function viewSettings() {
     const st = state.settings;
-    const head = topbar('设置', '数据存在这台设备的浏览器里');
+    const head = topbar('设置', '数据存在这台设备，可备份到云端');
 
     const storageInfo = '<div class="card"><div class="flex"><div class="grow">' +
       '<div style="font-size:14px;font-weight:600">本地存档</div>' +
@@ -708,8 +783,8 @@
       '<div class="tiny mb-12">删除本设备上的全部记录，不可恢复。建议先导出存档。</div>' +
       '<button class="btn danger" data-act="clear-all">清空全部记录</button></div>';
 
-    return head + storageInfo + importCard + optionCard + aboutCard + dangerCard +
-      '<div class="center tiny" style="padding:10px 0 24px;line-height:1.8">头疼日记 · 记录只保存在这台设备的浏览器里<br>' +
+    return head + cloudCard() + storageInfo + importCard + optionCard + aboutCard + dangerCard +
+      '<div class="center tiny" style="padding:10px 0 24px;line-height:1.8">头疼日记 · 不登录时记录只保存在这台设备的浏览器里<br>' +
       '本工具用于自我观察和就医参考，不能替代医生的诊断与治疗<br>' +
       '反复头痛或症状加重时，请及时就医</div>';
   }
@@ -1047,6 +1122,62 @@
     else if (act === 'pick-import') { document.getElementById('importFile').click(); }
     else if (act === 'clear-all') { await clearAll(); }
     else if (act === 'onboard-done') { await S.saveSettings({ onboarded: true }); state.settings = await S.getSettings(); closeSheet(); render(); }
+    else if (act === 'cloud-workbuddy') {
+      if (!window.Cloud) { toast('云服务未加载'); return; }
+      el.disabled = true;
+      const r = await Cloud.signInWithWorkBuddy();
+      if (r && r.error) { el.disabled = false; toast(r.error); }
+    }
+    else if (act === 'cloud-email') {
+      state.emailSent = false;
+      state.cloudMsg = '';
+      state.emailDraft = '';
+      openEmailLoginSheet();
+    }
+    else if (act === 'cloud-send-code' || act === 'cloud-resend') {
+      const email = readCloudEmail();
+      if (!email) { toast('请填写邮箱'); return; }
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) { toast('邮箱格式不对'); return; }
+      if (!window.Cloud) { toast('云服务未加载'); return; }
+      state.emailDraft = email;
+      el.disabled = true;
+      const r = await Cloud.sendEmailCode(email);
+      el.disabled = false;
+      if (r.error) { state.cloudMsg = r.error; openEmailLoginSheet(); return; }
+      state.emailSent = true;
+      state.cloudMsg = '';
+      openEmailLoginSheet();
+      toast('验证码已发送');
+    }
+    else if (act === 'cloud-verify') {
+      const code = readCloudCode();
+      if (!code) { toast('请填写验证码'); return; }
+      if (!window.Cloud) { toast('云服务未加载'); return; }
+      el.disabled = true;
+      const r = await Cloud.verifyEmailCode(state.emailDraft, code);
+      el.disabled = false;
+      if (r.error) { state.cloudMsg = r.error; openEmailLoginSheet(); return; }
+      state.emailSent = false;
+      state.cloudMsg = '';
+      closeSheet();
+      await cloudAfterLogin();
+    }
+    else if (act === 'cloud-sync') {
+      if (!window.Cloud) { toast('云服务未加载'); return; }
+      el.disabled = true;
+      const r = await Cloud.syncNow(S);
+      el.disabled = false;
+      if (r.error) { toast(r.error); return; }
+      await reload();
+      render();
+      toast('已同步');
+    }
+    else if (act === 'cloud-logout') {
+      if (!window.Cloud) return;
+      await Cloud.signOut();
+      render();
+      toast('已退出登录，记录仍保留在本机');
+    }
   });
 
   function handleBoolChip(btn) {
@@ -1174,6 +1305,7 @@
     d.hadHeadache = d.hadHeadache === true ? true : (d.hadHeadache === false ? false : null);
     d.updatedAt = Date.now();
     await S.put('days', d);
+    if (window.Cloud && Cloud.isSignedIn()) Cloud.pushOne('day', d.date, d, d.updatedAt);
     await reload();
     closeSheet();
     render();
@@ -1198,6 +1330,7 @@
     delete a.stillOn;
     a.updatedAt = Date.now();
     await S.put('attacks', a);
+    if (window.Cloud && Cloud.isSignedIn()) Cloud.pushOne('attack', a.id, a, a.updatedAt);
 
     // 同步当天打卡的头痛标记
     const day = await S.get('days', a.date);
@@ -1205,6 +1338,7 @@
       day.hadHeadache = true;
       day.updatedAt = Date.now();
       await S.put('days', day);
+      if (window.Cloud && Cloud.isSignedIn()) Cloud.pushOne('day', day.date, day, day.updatedAt);
     }
 
     await reload();
@@ -1217,6 +1351,7 @@
     const a = state.draft.data;
     if (!confirm('确定删除这次发作记录？')) return;
     await S.del('attacks', a.id);
+    if (window.Cloud && Cloud.isSignedIn()) Cloud.removeOne('attack', a.id);
     await reload();
     closeSheet();
     render();
@@ -1383,8 +1518,8 @@
         '<div class="d">只记头痛日，任何因素都会显得可疑。有无头痛日的对照，分析才成立。</div></div></div>' +
       '<div class="onboard-step"><div class="onboard-num">2</div><div><div class="t">发作当下就记</div>' +
         '<div class="d">疼痛程度、部位、用药效果，事后回忆会失真。</div></div></div>' +
-      '<div class="onboard-step"><div class="onboard-num">3</div><div><div class="t">数据只存在这台设备</div>' +
-        '<div class="d">没有账号，也不会上传。换设备或备份请在「设置」里导出存档。</div></div></div>' +
+      '<div class="onboard-step"><div class="onboard-num">3</div><div><div class="t">记录先存在这台设备，登录后可备份到云端</div>' +
+        '<div class="d">不登录也能用。想手机和电脑共用一份、并且每天自动备份到本地，就去「设置 → 云端备份」登录一次。</div></div></div>' +
       '<button class="btn mt-16" data-act="onboard-done">开始记录</button>');
   }
 
@@ -1404,6 +1539,15 @@
       if (hasIDB) { try { await S.migrateLocalToIDB(); } catch (e) { /* 迁移失败不影响使用 */ } }
       state.tab = tabFromHash();
       state.settings = await S.getSettings();
+
+      // 云登录回调必须赶在首次渲染之前处理完
+      if (window.Cloud) {
+        try { await Cloud.boot(); } catch (e) { /* 云不可用不影响本地使用 */ }
+        if (Cloud.isSignedIn()) {
+          try { await Cloud.syncNow(S); } catch (e) { /* 同步失败保留本地数据 */ }
+        }
+      }
+
       await reload();
       render();
       // 稍等再弹引导；如果用户已经开始操作，就不要打断他
