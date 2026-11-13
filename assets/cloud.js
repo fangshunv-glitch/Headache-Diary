@@ -171,6 +171,13 @@ window.Cloud = (function () {
 
   function isSignedIn() { return !!session; }
 
+  /* 当前账号的稳定标识：用来判断「本机这批记录属于谁」 */
+  function ownerKey() {
+    if (!session || !session.user) return '';
+    const u = session.user;
+    return String(u.id || u.user_id || u.email || u.phone || '');
+  }
+
   function accountLabel() {
     if (!session || !session.user) return '';
     const u = session.user;
@@ -311,7 +318,7 @@ window.Cloud = (function () {
   return {
     PUBLIC_CONFIG,
     boot, init,
-    isSignedIn, accountLabel, lastSyncAt, currentSession,
+    isSignedIn, accountLabel, lastSyncAt, currentSession, ownerKey,
     signInWithWorkBuddy, sendEmailCode, verifyEmailCode, signOut,
     syncNow, pushOne, removeOne,
     get error() { return lastError; },

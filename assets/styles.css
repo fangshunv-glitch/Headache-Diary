@@ -128,6 +128,16 @@ h1, h2, h3, h4, p { margin: 0; }
 }
 
 /* ===== 表单 ===== */
+.form-status {
+  display: block;
+  background: var(--brand-soft); color: var(--brand-deep);
+  border-radius: 12px; padding: 10px 13px;
+  font-size: 12.6px; line-height: 1.5;
+  margin-bottom: 18px;
+}
+.form-status b { font-weight: 650; }
+.form-status.new-day { background: #FDF6EC; color: #8A6234; }
+
 .field { margin-bottom: 22px; }
 .field:last-child { margin-bottom: 4px; }
 .field-label {
@@ -433,6 +443,19 @@ textarea { resize: vertical; min-height: 68px; line-height: 1.55; }
 #toast.show { opacity: 1; transform: translate(-50%, 0); }
 
 /* ===== 其他 ===== */
+/* 账号归属警告 */
+.alert {
+  background: #FDF1EE; border: 1px solid #F2D4CB; border-radius: 16px;
+  padding: 15px 16px; margin-bottom: 14px;
+}
+.alert-t { font-size: 14px; font-weight: 650; color: #A8432F; }
+.alert-d { font-size: 12.6px; line-height: 1.55; color: #8A4B39; margin-top: 6px; }
+
+/* 隐私与免责说明 */
+.priv-h { font-size: 13.5px; font-weight: 650; color: var(--ink); margin: 18px 0 6px; }
+.priv-h:first-child { margin-top: 0; }
+.priv-p { font-size: 13.2px; line-height: 1.65; color: var(--ink-2); }
+
 .divider { height: 1px; background: var(--line); margin: 18px 0; }
 .muted { color: var(--ink-3); font-size: 12.5px; line-height: 1.6; }
 .tiny { font-size: 11.8px; color: var(--ink-3); }

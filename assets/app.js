@@ -118,7 +118,8 @@
     draft: null,
     emailSent: false,
     emailDraft: '',
-    cloudMsg: ''
+    cloudMsg: '',
+    ownerConflict: null
   };
 
   /* ---------- 工具 ---------- */
@@ -131,6 +132,53 @@
 
   function $(sel, root) { return (root || document).querySelector(sel); }
   function $$(sel, root) { return Array.prototype.slice.call((root || document).querySelectorAll(sel)); }
+
+  /* ---------- 本机记录的账号归属 ----------
+   * 本地存储是一份，跟账号无关。换个人登录这台设备时，
+   * 如果不做判断，上一位使用者的记录就会被推到新账号的云端（数据串号）。
+   * 这里记下「本机记录属于谁」，登录时核对。 */
+
+  const OWNER_KEY = 'hd_owner';
+
+  function readOwner() {
+    try {
+      const raw = localStorage.getItem(OWNER_KEY);
+      if (!raw) return null;
+      const o = JSON.parse(raw);
+      return (o && o.id) ? o : null;
+    } catch (e) { return null; }
+  }
+
+  function writeOwner(id, label) {
+    try {
+      if (!id) localStorage.removeItem(OWNER_KEY);
+      else localStorage.setItem(OWNER_KEY, JSON.stringify({ id: id, label: label || '' }));
+    } catch (e) { /* 忽略 */ }
+  }
+
+  async function localRowCount() {
+    const [d, a] = await Promise.all([S.all('days'), S.all('attacks')]);
+    return d.length + a.length;
+  }
+
+  /* 返回 'anon' | 'ok' | 'adopted' | 'conflict' */
+  async function checkOwner() {
+    const C = window.Cloud;
+    if (!C || !C.isSignedIn()) { state.ownerConflict = null; return 'anon'; }
+    const cur = C.ownerKey();
+    if (!cur) { state.ownerConflict = null; return 'ok'; }
+    const n = await localRowCount();
+    const own = readOwner();
+    if (!n) { writeOwner(cur, C.accountLabel()); state.ownerConflict = null; return 'ok'; }
+    if (!own) { writeOwner(cur, C.accountLabel()); state.ownerConflict = null; return 'adopted'; }
+    if (own.id === cur) {
+      writeOwner(cur, C.accountLabel());
+      state.ownerConflict = null;
+      return 'ok';
+    }
+    state.ownerConflict = { local: own, current: cur, label: C.accountLabel(), count: n };
+    return 'conflict';
+  }
 
   let toastTimer = null;
   function toast(msg) {
@@ -219,7 +267,19 @@
     else if (state.tab === 'records') body = viewRecords();
     else if (state.tab === 'analysis') body = viewAnalysis();
     else body = viewSettings();
+    if (state.ownerConflict && state.tab !== 'settings') body = ownerAlert() + body;
     app.innerHTML = body + navHTML();
+  }
+
+  function ownerAlert() {
+    const c = state.ownerConflict;
+    if (!c) return '';
+    return '<div class="alert">' +
+      '<div class="alert-t">本机记录不属于当前账号</div>' +
+      '<div class="alert-d">这台设备上的 ' + c.count + ' 条记录属于 ' +
+      esc(c.local.label || '另一个账号') + '，现在登录的是 ' + esc(c.label) +
+      '。为了避免把别人的记录同步进你的云端，自动同步已经暂停。</div>' +
+      '<button class="btn danger sm mt-12" data-act="owner-conflict">去处理</button></div>';
   }
 
   function navHTML() {
@@ -333,6 +393,29 @@
 
   /* ---------- 记录 ---------- */
 
+  // 最近 n 天里没有打卡的日子（由近到远），用于补录
+  function missingDays(n) {
+    const today = S.dateStr();
+    const out = [];
+    for (let i = 1; i <= n; i++) {
+      const d = S.addDays(today, -i);
+      if (!state.ds.dayIndex.has(d)) out.push(d);
+    }
+    return out;
+  }
+
+  function missHintCard() {
+    const miss = missingDays(14);
+    if (!miss.length) return '';
+    return '<div class="card" style="background:#FCF8F2;border:1px solid #F0E4D2">' +
+      '<div class="flex"><div class="grow" style="min-width:0">' +
+      '<div style="font-size:14px;font-weight:600;color:#8A6234">近 14 天有 ' + miss.length + ' 天没打卡</div>' +
+      '<div class="tiny mt-8" style="color:#9A7A4E">' +
+      miss.slice(0, 6).map((d) => S.fmtDateCN(d, false)).join('、') + (miss.length > 6 ? ' 等' : '') +
+      '</div></div>' +
+      '<button class="btn ghost sm" data-act="pick-day">去补录</button></div></div>';
+  }
+
   function viewRecords() {
     const days = state.ds.days.slice().reverse();
     const attackOnly = state.ds.attacks.filter((a) => !state.ds.dayIndex.has(a.date));
@@ -349,7 +432,8 @@
     if (!rows.length) {
       return topbar('记录', '还没有任何记录') +
         '<div class="card"><div class="empty">从今天开始，先做一次打卡。<br>哪怕这天没头痛，也要记 —— 那是分析的对照。</div>' +
-        '<button class="btn mt-12" data-act="edit-day" data-date="' + S.dateStr() + '">今日打卡</button></div>';
+        '<div class="btn-row mt-12"><button class="btn line" data-act="pick-day">补录过去某天</button>' +
+        '<button class="btn grow" data-act="edit-day" data-date="' + S.dateStr() + '">今日打卡</button></div></div>';
     }
 
     // 按月份分组
@@ -370,10 +454,10 @@
         }).join('') + '</div>';
     }).join('');
 
-    const head = topbar('记录', '共 ' + rows.length + ' 条', 
-      '<button class="btn ghost sm" data-act="edit-day" data-date="' + S.dateStr() + '">打卡</button>');
+    const head = topbar('记录', '共 ' + rows.length + ' 条',
+      '<button class="btn ghost sm" data-act="pick-day">补录</button>');
 
-    return head + '<div class="mt-8"></div>' + html;
+    return head + '<div class="mt-8"></div>' + missHintCard() + html;
   }
 
   function dayRow(d) {
@@ -735,10 +819,68 @@
   }
 
   async function cloudAfterLogin() {
+    const g = await checkOwner();
+    if (g === 'conflict') {
+      await reload();
+      render();
+      openOwnerConflictSheet();
+      return;
+    }
     try { await Cloud.syncNow(S); } catch (e) { /* 忽略，稍后可手动同步 */ }
     await reload();
     render();
-    toast('已登录，记录已与云端合并');
+    toast(g === 'adopted' ? '已登录，本机记录已归到这个账号' : '已登录，记录已与云端合并');
+  }
+
+  /* ---------- 账号冲突处理 ---------- */
+
+  function openOwnerConflictSheet() {
+    const c = state.ownerConflict;
+    if (!c) return;
+    let h = '<div class="muted">当前登录：<b>' + esc(c.label) + '</b></div>' +
+      '<div class="muted mt-8">本机记录：<b>' + c.count + '</b> 条，属于 <b>' + esc(c.local.label || '另一个账号') + '</b></div>';
+    h += '<div class="insight mt-16">这台设备要给现在这个账号用的话，得先清掉上一位使用者的本机记录 —— ' +
+      '否则一同步，对方的记录就会被传到你的云端账号里。' +
+      '<br><br>想保留对方的记录？让他先登录回去、在设置里「导出存档」，再来清空。</div>';
+    h += '<div class="field-hint">清空只影响这台设备。已经同步到云端的记录不受影响。</div>';
+    h += '<div class="btn-row sheet-actions">' +
+      '<button class="btn line" data-act="close-sheet">先不动</button>' +
+      '<button class="btn danger grow" data-act="owner-reset">清空本机记录</button></div>';
+    openSheet('本机记录归属冲突', h);
+    state.sheet = { kind: 'owner-conflict' };
+  }
+
+  /* ---------- 隐私与免责说明 ---------- */
+
+  function openPrivacySheet() {
+    const d = state.ds;
+    const h = '' +
+      '<div class="priv-h">这是什么</div>' +
+      '<div class="priv-p">一个自己记录头痛、睡眠、饮食、压力的笔记本，用来找自己的诱因。' +
+      '<b>它不是医疗器械，不做诊断，也不替代就医。</b>分析页里的所有数字都是相关性的描述，不是医嘱。</div>' +
+
+      '<div class="priv-h">数据存在哪里</div>' +
+      '<div class="priv-p">默认只存在你这台设备的浏览器里（IndexedDB）。登录后，同一份数据会另存一份到云端，' +
+      '以便换设备时同步。不登录也能完整使用，只是数据仅在本机。</div>' +
+
+      '<div class="priv-h">谁能看到</div>' +
+      '<div class="priv-p">只有你这个账号。云端按账号隔离，别人登录自己账号看不到你的记录。' +
+      '同一台设备换账号时，本机记录也会要求先清空，不会被带到别人账号里。</div>' +
+
+      '<div class="priv-h">怎么删掉</div>' +
+      '<div class="priv-p">设置 →「清空本机记录」只删这台设备。云端的记录随账号，需要删除可联系作者处理。' +
+      '<br>清理浏览器数据、无痕模式也会一并清掉本机记录，所以请定期「导出存档」。</div>' +
+
+      '<div class="priv-h">请不要填这些</div>' +
+      '<div class="priv-p">真实姓名、身份证号、电话、住址。备注栏写症状和用药就够，不要写能定位到你个人的信息。</div>' +
+
+      '<div class="priv-h">什么时候别用它，直接去医院</div>' +
+      '<div class="priv-p">突然炸开样的剧烈头痛（雷击样）、伴发热和脖子发硬、意识模糊、肢体无力或说话不清、' +
+      '视物不清、头部外伤后的头痛、50 岁后新发的头痛。这些不是记日记能解决的事。</div>' +
+
+      '<div class="tiny mt-16">最后更新：2026-11-13</div>';
+    openSheet('隐私与免责说明', h);
+    state.sheet = { kind: 'privacy' };
   }
 
   function viewSettings() {
@@ -783,7 +925,12 @@
       '<div class="tiny mb-12">删除本设备上的全部记录，不可恢复。建议先导出存档。</div>' +
       '<button class="btn danger" data-act="clear-all">清空全部记录</button></div>';
 
-    return head + cloudCard() + storageInfo + importCard + optionCard + aboutCard + dangerCard +
+    const privacyCard = '<div class="card"><div style="font-size:14px;font-weight:600;margin-bottom:4px">隐私与免责说明</div>' +
+      '<div class="tiny mb-12">数据存在哪、谁能看到、怎么删除，以及哪些情况必须直接就医。</div>' +
+      '<button class="btn line" data-act="open-privacy">查看说明</button></div>';
+
+    return head + (state.ownerConflict ? ownerAlert() : '') + cloudCard() +
+      storageInfo + importCard + optionCard + aboutCard + privacyCard + dangerCard +
       '<div class="center tiny" style="padding:10px 0 24px;line-height:1.8">头疼日记 · 不登录时记录只保存在这台设备的浏览器里<br>' +
       '本工具用于自我观察和就医参考，不能替代医生的诊断与治疗<br>' +
       '反复头痛或症状加重时，请及时就医</div>';
@@ -807,7 +954,11 @@
     state.sheet = opts || {};
   }
 
-  function closeSheet(keepDraft) {
+  function closeSheet(keepDraft, force) {
+    // 有未保存的改动时先问一句，避免误触遮罩丢掉刚填好的内容
+    if (!keepDraft && !force && state.draft && state.draft.dirty) {
+      if (!confirm('这次的修改还没保存，确定放弃？')) return;
+    }
     const root = document.getElementById('sheet-root');
     const mask = $('.sheet-mask', root), sheet = $('.sheet', root);
     if (mask) mask.classList.remove('show');
@@ -815,6 +966,43 @@
     state.sheet = null;
     if (!keepDraft) state.draft = null;
     setTimeout(() => { if (!state.sheet) root.innerHTML = ''; }, 280);
+  }
+
+  function markDirty() {
+    if (state.draft) state.draft.dirty = true;
+  }
+
+  /* ---------- 补录 / 选日期 ---------- */
+
+  function openBackfillSheet() {
+    const today = S.dateStr();
+    const miss = missingDays(21);
+    const def = miss[0] || S.addDays(today, -1);
+
+    let h = '<div class="field-hint">补录只能靠回忆。<b>记不清的项就留空，不要猜</b> —— 猜出来的数据会把分析带偏。</div>';
+
+    h += '<div class="field" style="margin-top:16px"><div class="field-label"><span>要补哪一天</span></div>' +
+      '<input type="date" value="' + def + '" max="' + today + '" id="backfillDate"></div>';
+
+    if (miss.length) {
+      h += '<div class="section-title" style="margin:4px 4px 8px">最近没打卡的日期</div>' +
+        '<div class="card pad-0">' + miss.slice(0, 14).map((d) => {
+          const ago = S.diffDays(today, d);
+          return '<button class="list-item" data-act="backfill-open" data-date="' + d + '">' +
+            '<span class="dot" style="background:#E2C7A2"></span>' +
+            '<div class="li-main"><div class="li-t">' + S.fmtDateCN(d, false) + '</div>' +
+            '<div class="li-s">' + S.WEEK_CN[S.parseDate(d).getDay()] + (ago > 0 ? ' · ' + ago + ' 天前' : '') + '</div></div>' +
+            '<span class="pill warn">补录</span></button>';
+        }).join('') + '</div>';
+    } else {
+      h += '<div class="card"><div class="empty">最近三周都打了卡。</div></div>';
+    }
+
+    h += '<div class="btn-row sheet-actions"><button class="btn line" data-act="close-sheet">取消</button>' +
+      '<button class="btn grow" data-act="backfill-open" data-date="">打开这天</button></div>';
+
+    openSheet('补录 / 选择日期', h);
+    state.sheet = { kind: 'backfill' };
   }
 
   /* ---------- 每日打卡表单 ---------- */
@@ -846,7 +1034,7 @@
   async function openDaySheet(date) {
     const existing = await S.get('days', date);
     const d = existing ? JSON.parse(JSON.stringify(existing)) : defaultDay(date);
-    state.draft = { kind: 'day', data: d };
+    state.draft = { kind: 'day', data: d, origin: existing ? 'existing' : 'new', dirty: false };
     renderDaySheet(true);
   }
 
@@ -881,8 +1069,18 @@
     const d = state.draft.data;
     const st = state.settings;
     const maxDate = S.dateStr();
+    const isExisting = state.draft.origin === 'existing';
+    const isToday = d.date === maxDate;
 
     let h = '';
+    h += '<div class="form-status' + (isExisting ? '' : ' new-day') + '">' + (
+      isExisting
+        ? '<b>' + esc(S.fmtDateCN(d.date, true)) + '</b> 已有打卡记录，这里显示的就是原有内容，保存只改这一天。'
+        : (isToday
+          ? '<b>今天</b> 还没有打卡。'
+          : '<b>' + esc(S.fmtDateCN(d.date, true)) + '</b> 还没有打卡，这是补录 —— 想不起来的项留空就好。')
+    ) + '</div>';
+
     h += '<div class="field"><div class="field-label"><span>记录日期</span></div>' +
       '<input type="date" value="' + d.date + '" max="' + maxDate + '" data-day-date="1"></div>';
 
@@ -1080,6 +1278,7 @@
     if (sevBtn) {
       if (!state.draft || state.draft.kind !== 'attack') return;
       state.draft.data.severity = Number(sevBtn.dataset.sevVal);
+      markDirty();
       refreshSheet();
       return;
     }
@@ -1103,6 +1302,17 @@
       window.scrollTo(0, 0);
     }
     else if (act === 'close-sheet') { closeSheet(); }
+    else if (act === 'pick-day') { openBackfillSheet(); }
+    else if (act === 'backfill-open') {
+      let d = el.dataset.date || '';
+      if (!d) {
+        const inp = document.getElementById('backfillDate');
+        d = inp ? String(inp.value || '') : '';
+      }
+      if (!d) { toast('请选择日期'); return; }
+      if (d > S.dateStr()) { toast('还不能补未来的日期'); return; }
+      await openDaySheet(d);
+    }
     else if (act === 'edit-day') { await openDaySheet(el.dataset.date || S.dateStr()); }
     else if (act === 'save-day') { await saveDay(); }
     else if (act === 'new-attack') { await openAttackSheet(null); }
@@ -1164,6 +1374,7 @@
     }
     else if (act === 'cloud-sync') {
       if (!window.Cloud) { toast('云服务未加载'); return; }
+      if (state.ownerConflict) { openOwnerConflictSheet(); return; }
       el.disabled = true;
       const r = await Cloud.syncNow(S);
       el.disabled = false;
@@ -1174,10 +1385,28 @@
     }
     else if (act === 'cloud-logout') {
       if (!window.Cloud) return;
+      if (state.ds.days.length && !confirm('退出后，本机记录仍保留在这台设备上。\n\n如果这台设备要给别的账号用，记得先「清空本机记录」，否则对方登录后会看到这些记录。\n\n继续退出？')) return;
       await Cloud.signOut();
+      state.ownerConflict = null;
       render();
       toast('已退出登录，记录仍保留在本机');
     }
+    else if (act === 'owner-conflict') { openOwnerConflictSheet(); }
+    else if (act === 'owner-reset') {
+      const c = state.ownerConflict;
+      if (!c) return;
+      if (!confirm('将永久删除这台设备上的 ' + c.count + ' 条记录。\n\n已同步到云端的记录不受影响。建议先「导出存档」备份。继续？')) return;
+      await S.clearAll();
+      writeOwner(Cloud.ownerKey(), Cloud.accountLabel());
+      state.ownerConflict = null;
+      state.settings = await S.getSettings();
+      closeSheet(false, true);
+      const r = await Cloud.syncNow(S);
+      await reload();
+      render();
+      toast(r && r.error ? r.error : '已清空本机记录，当前账号已启用');
+    }
+    else if (act === 'open-privacy') { openPrivacySheet(); }
   });
 
   function handleBoolChip(btn) {
@@ -1186,6 +1415,7 @@
     const d = state.draft.data;
     if (!(field in d)) d[field] = false;
     d[field] = d[field] !== true;
+    markDirty();
     refreshSheet();
   }
 
@@ -1208,7 +1438,7 @@
       }
     };
 
-    if (kind === 'day') { apply(d); refreshSheet(); }
+    if (kind === 'day') { apply(d); markDirty(); refreshSheet(); }
     else if (kind === 'attack') {
       if (field === 'locations' || field === 'qualities' || field === 'symptoms' || field === 'triggers' || field === 'prodrome') {
         apply(d);
@@ -1220,9 +1450,11 @@
             ? (arr.indexOf(NONE) >= 0 ? [NONE] : [])
             : arr.filter((x) => x !== NONE);
         }
+        markDirty();
         refreshSheet();
       } else if (field === 'medicine') {
         d.medicine = val;
+        markDirty();
         refreshSheet();
       }
     }
@@ -1243,12 +1475,13 @@
       val = raw === 'true' ? true : raw === 'false' ? false : null;
     }
 
-    if (kind === 'day' && (field in d)) { d[field] = val; refreshSheet(); }
+    if (kind === 'day' && (field in d)) { d[field] = val; markDirty(); refreshSheet(); }
     else if (kind === 'attack' && (field in d)) {
       d[field] = val;
       if (field === 'stillOn' && !val && !d.endAt) {
         d.endAt = new Date().toISOString();
       }
+      markDirty();
       refreshSheet();
     }
   }
@@ -1260,6 +1493,7 @@
     const d = state.draft.data;
     if (!(field in d)) return;
     d[field] = !d[field];
+    markDirty();
     // 手点过的折叠区保持展开，别在重绘时塌回去
     const det = btn.closest('details[data-fold]');
     if (det && state.openFolds) state.openFolds[det.dataset.fold] = true;
@@ -1273,6 +1507,7 @@
     if (t.dataset.dayField) {
       if (!state.draft || state.draft.kind !== 'day') return;
       state.draft.data[t.dataset.dayField] = t.value;
+      markDirty();
       return;
     }
     if (t.dataset.attField) {
@@ -1284,6 +1519,7 @@
       } else {
         state.draft.data[f] = v;
       }
+      markDirty();
       return;
     }
   });
@@ -1302,14 +1538,25 @@
   async function saveDay() {
     const d = state.draft.data;
     if (!d.date) { toast('请选择日期'); return; }
+    if (d.date > S.dateStr()) { toast('日期不能是未来'); return; }
+
+    // 防覆盖：一开始当作新增，但库里其实已经有这一天（比如刚被云同步拉下来）
+    const cur = await S.get('days', d.date);
+    if (cur && state.draft.origin !== 'existing') {
+      const yes = confirm(S.fmtDateCN(d.date, true) + ' 已经有一条记录（可能是云同步下来的）。\n\n用现在填的内容覆盖它吗？\n建议点「取消」——回去从记录列表打开这天，原有的内容会全部载入，改完再保存。');
+      if (!yes) return;
+    }
+
     d.hadHeadache = d.hadHeadache === true ? true : (d.hadHeadache === false ? false : null);
     d.updatedAt = Date.now();
+    state.draft.dirty = false;
     await S.put('days', d);
     if (window.Cloud && Cloud.isSignedIn()) Cloud.pushOne('day', d.date, d, d.updatedAt);
     await reload();
-    closeSheet();
+    closeSheet(false, true);
     render();
-    toast('已保存');
+    const left = missingDays(7).length;
+    toast(left ? '已保存 · 近 7 天还有 ' + left + ' 天没打卡' : '已保存');
     if (d.hadHeadache === true && !state.ds.attackByDate.has(d.date)) {
       setTimeout(() => {
         openSheet('记一下这次发作？', '<div class="muted mb-12">你标记了这天头痛，补充发作细节（强度、部位、用药）会让分析更准。</div>' +
@@ -1329,6 +1576,7 @@
     a.date = S.dateStr(new Date(a.startAt));
     delete a.stillOn;
     a.updatedAt = Date.now();
+    state.draft.dirty = false;
     await S.put('attacks', a);
     if (window.Cloud && Cloud.isSignedIn()) Cloud.pushOne('attack', a.id, a, a.updatedAt);
 
@@ -1342,7 +1590,7 @@
     }
 
     await reload();
-    closeSheet();
+    closeSheet(false, true);
     render();
     toast('已记录');
   }
@@ -1353,7 +1601,7 @@
     await S.del('attacks', a.id);
     if (window.Cloud && Cloud.isSignedIn()) Cloud.removeOne('attack', a.id);
     await reload();
-    closeSheet();
+    closeSheet(false, true);
     render();
     toast('已删除');
   }
@@ -1473,12 +1721,21 @@
   document.addEventListener('change', async (e) => {
     if (e.target.dataset && e.target.dataset.dayDate) {
       const nd = e.target.value;
-      if (!nd) return;
       if (!state.draft || state.draft.kind !== 'day') return;
-      if (nd === state.draft.data.date) return;
+      const curDate = state.draft.data.date;
+      if (!nd || nd === curDate) return;
+      if (nd > S.dateStr()) { e.target.value = curDate; toast('还不能补未来的日期'); return; }
+      // 换了日期就要重新加载这一天的数据，先确认当前没保存的修改要不要放弃
+      if (state.draft.dirty && !confirm('切换日期会丢掉刚才还没保存的修改，继续？')) {
+        e.target.value = curDate;
+        return;
+      }
       const existing = await S.get('days', nd);
       state.draft.data = existing ? JSON.parse(JSON.stringify(existing)) : defaultDay(nd);
+      state.draft.origin = existing ? 'existing' : 'new';
+      state.draft.dirty = false;
       refreshSheet();
+      toast(existing ? '这天已有记录，已载入原有内容' : '切到 ' + S.fmtDateCN(nd, true) + ' · 还没有记录');
       return;
     }
     if (e.target.id !== 'importFile') return;
@@ -1504,6 +1761,7 @@
     if (!confirm('确定清空本设备上的全部记录？此操作不可恢复，建议先导出存档。')) return;
     if (!confirm('再确认一次：所有打卡和发作记录都会被删除。')) return;
     await S.clearAll();
+    state.settings = await S.getSettings();
     await reload();
     render();
     toast('已清空');
@@ -1544,7 +1802,11 @@
       if (window.Cloud) {
         try { await Cloud.boot(); } catch (e) { /* 云不可用不影响本地使用 */ }
         if (Cloud.isSignedIn()) {
-          try { await Cloud.syncNow(S); } catch (e) { /* 同步失败保留本地数据 */ }
+          // 先核对本机记录归属；属于别的账号就不许同步，免得串号
+          const g = await checkOwner();
+          if (g !== 'conflict') {
+            try { await Cloud.syncNow(S); } catch (e) { /* 同步失败保留本地数据 */ }
+          }
         }
       }
 
